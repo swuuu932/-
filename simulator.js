@@ -1,6 +1,6 @@
 /**
  * 2D Linkage Mechanism Simulator (2차원 링크 메커니즘 시뮬레이터)
- * Exact Analytical Rigid-Body Kinematics Engine (100% Fixed Bar Length)
+ * Exact Analytical Rigid-Body Kinematics Engine with Uniform Initial Alignment
  */
 
 (function () {
@@ -47,11 +47,12 @@
     N: 4,                  // 관절/축 개수
     r: 120,                // 고정축 간격
     a: 80,                 // 굵은 막대 a 길이 (완전 고정 강체)
-    b: 130,                // 가는 막대 b 길이 (완전 고정 강체)
+    b: 120,                // 가는 막대 b 길이 (완전 고정 강체, 기본 r과 일치하여 완벽한 평행 구성)
     speedDeg: 45,          // 자동 회전 속도 (deg/sec)
+    defaultAngle: -Math.PI / 3, // 상방 +60도 (수평면 기준 통일된 초기 기준 각도)
     
     isAutoRotating: false,
-    autoRotateAngle: 0,    // 1번 크랭크 각도 (rad)
+    autoRotateAngle: -Math.PI / 3,
     
     // Nodes
     axes: [],              // O_1 .. O_N
@@ -77,7 +78,7 @@
     }
   };
 
-  // Trace Colors for distinct visualization
+  // Trace Colors
   const TRACE_COLORS = [
     '#38bdf8', '#f43f5e', '#10b981', '#f59e0b', 
     '#ec4899', '#14b8a6', '#6366f1', '#8b5cf6'
@@ -96,6 +97,13 @@
     resizeCanvas();
   });
 
+  function normalizeAngleDiff(angle1, angle2) {
+    let diff = angle1 - angle2;
+    while (diff < -Math.PI) diff += 2 * Math.PI;
+    while (diff > Math.PI) diff -= 2 * Math.PI;
+    return diff;
+  }
+
   // --- Exact Circle-Circle Intersection Solver ---
   /**
    * Solves analytically for Point P such that:
@@ -103,18 +111,19 @@
    * 2. |P - targetP| = r2 (Radius r2 around neighbor joint, length of bar b)
    * 
    * Guarantees 100% exact mathematical rigidity with ZERO stretching or deformation.
-   * Chooses the solution branch maintaining continuous smooth displacement from prevP.
+   * refAngleOrPrevP:
+   *  - if number: selects branch minimizing angular difference to this reference angle (parallel uncrossed branch)
+   *  - if object {x, y}: selects branch closest to this previous point (smooth trajectory continuity)
    */
-  function solveCircleIntersection(O, r1, targetP, r2, prevP = null) {
+  function solveCircleIntersection(O, r1, targetP, r2, refAngleOrPrevP = null) {
     const dx = targetP.x - O.x;
     const dy = targetP.y - O.y;
     const d = Math.hypot(dx, dy);
 
     // Physical Reach Limit Check
-    // If distance d > r1 + r2 or d < |r1 - r2|, circles do NOT intersect!
     const eps = 1e-5;
     if (d > r1 + r2 + eps || d < Math.abs(r1 - r2) - eps || d < eps) {
-      return null; // Out of reach limit
+      return null; // Out of geometric reach limit
     }
 
     const clampedD = Math.max(Math.abs(r1 - r2), Math.min(r1 + r2, d));
@@ -138,28 +147,36 @@
       y: O.y + x0 * uy - h * vy
     };
 
-    if (!prevP) {
-      // Default to upper branch (smaller y in canvas coords)
+    if (refAngleOrPrevP === null) {
+      // Default to upper branch in canvas coordinates (smaller y)
       return sol1.y <= sol2.y ? sol1 : sol2;
     }
 
+    if (typeof refAngleOrPrevP === 'number') {
+      // Choose solution whose angle is closest to refAngle (uncrossed parallel branch)
+      const a1 = Math.atan2(sol1.y - O.y, sol1.x - O.x);
+      const a2 = Math.atan2(sol2.y - O.y, sol2.x - O.x);
+      const diff1 = Math.abs(normalizeAngleDiff(a1, refAngleOrPrevP));
+      const diff2 = Math.abs(normalizeAngleDiff(a2, refAngleOrPrevP));
+      return diff1 <= diff2 ? sol1 : sol2;
+    }
+
     // Branch continuity: select solution closest to previous position
-    const d1 = Math.hypot(sol1.x - prevP.x, sol1.y - prevP.y);
-    const d2 = Math.hypot(sol2.x - prevP.x, sol2.y - prevP.y);
+    const d1 = Math.hypot(sol1.x - refAngleOrPrevP.x, sol1.y - refAngleOrPrevP.y);
+    const d2 = Math.hypot(sol2.x - refAngleOrPrevP.x, sol2.y - refAngleOrPrevP.y);
     return d1 <= d2 ? sol1 : sol2;
   }
 
   // --- Cascading Chain Kinematics Solver ---
   /**
-   * Attempts to solve the entire linkage chain with crank drivenIndex at targetAngle.
-   * Propagates backwards to joint 0 and forwards to joint N-1.
-   * Returns array of valid joint states if 100% geometrically reachable, or null if physical limit hit.
+   * Solves the whole linkage chain with crank drivenIndex at targetAngle.
+   * Maintains uncrossed, parallel-aligned continuous motion.
    */
   function solveChainFrom(drivenIndex, targetAngle) {
     const { N, a, b, axes, cranks } = state;
     const cand = new Array(N);
 
-    // 1. Position of driven crank
+    // 1. Driven crank position
     const drivenAxis = axes[drivenIndex];
     cand[drivenIndex] = {
       x: drivenAxis.x + a * Math.cos(targetAngle),
@@ -171,9 +188,9 @@
     for (let i = drivenIndex - 1; i >= 0; i--) {
       const axis = axes[i];
       const nextP = cand[i + 1];
-      const prevCrank = cranks[i];
+      const prevCrank = cranks[i] && cranks[i].x !== undefined ? cranks[i] : cand[i + 1].angle;
       const sol = solveCircleIntersection(axis, a, nextP, b, prevCrank);
-      if (!sol) return null; // Hit backward reach limit!
+      if (!sol) return null; // Backward reach limit hit
 
       cand[i] = {
         x: sol.x,
@@ -186,9 +203,9 @@
     for (let i = drivenIndex + 1; i < N; i++) {
       const axis = axes[i];
       const prevP = cand[i - 1];
-      const prevCrank = cranks[i];
+      const prevCrank = cranks[i] && cranks[i].x !== undefined ? cranks[i] : cand[i - 1].angle;
       const sol = solveCircleIntersection(axis, a, prevP, b, prevCrank);
-      if (!sol) return null; // Hit forward reach limit!
+      if (!sol) return null; // Forward reach limit hit
 
       cand[i] = {
         x: sol.x,
@@ -211,26 +228,60 @@
     }
   }
 
-  // --- Initial Pose Discovery ---
+  // --- Uniform Initial Pose Alignment ---
   /**
-   * Scans for a geometrically valid initial configuration where all bars
-   * strictly satisfy their rigid length constraints.
+   * 요구사항 1 & 2: 초기 상태 및 초기화 시 모든 막대 a의 각도를 동일하게 정렬 (예: 상방 +60도).
+   * 꼬임 없이 순차적으로 자연스럽게 정렬된 uncrossed parallel chain을 구성.
    */
-  function findValidInitialPose() {
-    const candidates = [
-      -Math.PI / 2, -Math.PI / 3, -2 * Math.PI / 3, 
-      -Math.PI / 4, -3 * Math.PI / 4, -0.1, 0.1
-    ];
+  function setUniformInitialPose(targetAngle = state.defaultAngle) {
+    const { N, a, b, axes } = state;
+    const cand = new Array(N);
+
+    // Crank 0 at uniform target angle (상방 60도)
+    cand[0] = {
+      x: axes[0].x + a * Math.cos(targetAngle),
+      y: axes[0].y + a * Math.sin(targetAngle),
+      angle: targetAngle
+    };
+
+    // Sequentially align all other cranks to the exact same uniform direction
+    let isPossible = true;
+    for (let i = 1; i < N; i++) {
+      const axis = axes[i];
+      const prevP = cand[i - 1];
+      // Target the uniform targetAngle to strictly align parallel branches
+      const sol = solveCircleIntersection(axis, a, prevP, b, targetAngle);
+      if (!sol) {
+        isPossible = false;
+        break;
+      }
+      cand[i] = {
+        x: sol.x,
+        y: sol.y,
+        angle: Math.atan2(sol.y - axis.y, sol.x - axis.x)
+      };
+    }
+
+    if (isPossible) {
+      applyChain(cand);
+      state.autoRotateAngle = state.cranks[0].angle;
+      return true;
+    }
+
+    // Fallback: If exact targetAngle cannot close due to custom r, a, b values,
+    // search closest uniform upper angle
+    const candidates = [-Math.PI / 2, -Math.PI / 3, -2 * Math.PI / 3, -Math.PI / 4, -0.2, 0.2];
     for (const ang of candidates) {
-      const cand = solveChainFrom(0, ang);
-      if (cand) return cand;
+      const testCand = solveChainFrom(0, ang);
+      if (testCand) {
+        applyChain(testCand);
+        state.autoRotateAngle = state.cranks[0].angle;
+        return true;
+      }
     }
-    // Fine scan if default angles don't resolve
-    for (let ang = -Math.PI; ang <= Math.PI; ang += 0.05) {
-      const cand = solveChainFrom(0, ang);
-      if (cand) return cand;
-    }
-    return null;
+
+    showAlert('⚠️ 현재 입력된 수치로는 링크를 연결할 수 없습니다. 축 간격(r)이나 막대 길이를 확인해 주세요.');
+    return false;
   }
 
   // --- Mechanism Initialization ---
@@ -269,22 +320,16 @@
         id: `P${i + 1}`,
         index: i,
         type: 'crank',
-        angle: -Math.PI / 2,
-        x: axis.x,
-        y: axis.y - a,
+        angle: state.defaultAngle,
+        x: axis.x + a * Math.cos(state.defaultAngle),
+        y: axis.y + a * Math.sin(state.defaultAngle),
         radius: 8,
         axisIndex: i
       });
     }
 
-    // 3. Solve exact rigid configuration
-    const initialPose = findValidInitialPose();
-    if (initialPose) {
-      applyChain(initialPose);
-      state.autoRotateAngle = state.cranks[0].angle;
-    } else {
-      showAlert('⚠️ 현재 입력된 수치(r, a, b)로는 강체 링크를 연결할 수 없습니다. 축 간격(r)이나 막대 길이를 조절해 주세요.');
-    }
+    // 3. Apply Uniform Initial Alignment
+    setUniformInitialPose(state.defaultAngle);
 
     updateDashboard();
   }
@@ -348,19 +393,17 @@
     const dt = Math.min((timestamp - lastTimestamp) / 1000, 0.05);
     lastTimestamp = timestamp;
 
-    // 요구사항 2-A: 자동 회전 중 기하학적 한계에 부딪히면 막대 길이를 유지한 채 자동 회전을 즉시 정지
     if (state.isAutoRotating && !state.draggedNode && state.cranks.length > 0) {
       const speedRad = (state.speedDeg * Math.PI) / 180;
       const nextAngle = state.autoRotateAngle + speedRad * dt;
 
-      // Exact rigid validation before advancing
       const cand = solveChainFrom(0, nextAngle);
       if (cand) {
         applyChain(cand);
         state.autoRotateAngle = nextAngle;
         recordTraces();
       } else {
-        // Physical limit reached! Stop auto-rotation immediately without deforming bars
+        // Physical limit reached: stop auto-rotation without deforming bars
         setAutoRotation(false);
         showAlert('🛑 기하학적 한계(Reach Limit) 도달: 막대 길이를 유지하기 위해 자동 회전이 정지되었습니다.');
       }
@@ -392,7 +435,7 @@
       drawTraces();
     }
 
-    // 4. Bars (Strictly 100% fixed lengths a and b)
+    // 4. Bars (Rigid 100% fixed lengths a and b)
     drawBars();
 
     // 5. Fixed Axes (O_1 .. O_N)
@@ -426,7 +469,6 @@
     ctx.lineWidth = 1;
     ctx.setLineDash([4, 4]);
 
-    // Circle of radius a around each fixed axis O_i
     ctx.strokeStyle = 'rgba(56, 189, 248, 0.2)';
     for (const axis of state.axes) {
       ctx.beginPath();
@@ -434,7 +476,6 @@
       ctx.stroke();
     }
 
-    // Reach circles of radius b from cranks P_i
     ctx.strokeStyle = 'rgba(244, 63, 94, 0.15)';
     for (const crank of state.cranks) {
       ctx.beginPath();
@@ -469,7 +510,6 @@
   }
 
   function drawBars() {
-    // 요구사항 3: 캔버스에 그려지는 모든 막대(a, b)의 시각적 길이는 수치 입력창과 100% 일치
     // --- Draw Thin Bars (b): P_i to P_{i+1} ---
     ctx.save();
     ctx.lineWidth = 3.5;
@@ -495,14 +535,12 @@
       const axis = state.axes[i];
       const crank = state.cranks[i];
 
-      // Outer border
       ctx.strokeStyle = '#0284c7';
       ctx.beginPath();
       ctx.moveTo(axis.x, axis.y);
       ctx.lineTo(crank.x, crank.y);
       ctx.stroke();
 
-      // Inner highlight line for metallic shine
       ctx.lineWidth = 4;
       ctx.strokeStyle = '#38bdf8';
       ctx.beginPath();
@@ -521,7 +559,7 @@
 
       ctx.save();
 
-      // Ground bracket hatch triangle
+      // Ground bracket
       ctx.fillStyle = 'rgba(23, 31, 45, 0.9)';
       ctx.strokeStyle = '#f59e0b';
       ctx.lineWidth = 2;
@@ -533,7 +571,6 @@
       ctx.fill();
       ctx.stroke();
 
-      // Hatching stripes
       ctx.beginPath();
       for (let ox = -14; ox <= 14; ox += 7) {
         ctx.moveTo(axis.x + ox, axis.y + 20);
@@ -547,13 +584,11 @@
       ctx.arc(axis.x, axis.y, axis.radius, 0, Math.PI * 2);
       ctx.fill();
 
-      // Inner center dot
       ctx.fillStyle = '#0f141c';
       ctx.beginPath();
       ctx.arc(axis.x, axis.y, 4, 0, Math.PI * 2);
       ctx.fill();
 
-      // Hover / Drag Glow
       if (isHovered || isDragged) {
         ctx.strokeStyle = '#fbbf24';
         ctx.lineWidth = 2.5;
@@ -562,7 +597,6 @@
         ctx.stroke();
       }
 
-      // Label
       if (checkLabels.checked) {
         ctx.fillStyle = '#f59e0b';
         ctx.font = 'bold 11px ui-monospace, monospace';
@@ -580,7 +614,6 @@
       const isDragged = state.draggedNode === crank;
 
       ctx.save();
-      // Outer Halo
       if (isHovered || isDragged) {
         ctx.fillStyle = 'rgba(16, 185, 129, 0.25)';
         ctx.beginPath();
@@ -588,7 +621,6 @@
         ctx.fill();
       }
 
-      // Joint Circle
       ctx.fillStyle = '#10b981';
       ctx.strokeStyle = '#064e3b';
       ctx.lineWidth = 2;
@@ -597,13 +629,11 @@
       ctx.fill();
       ctx.stroke();
 
-      // Center Pin
       ctx.fillStyle = '#ffffff';
       ctx.beginPath();
       ctx.arc(crank.x, crank.y, 2.5, 0, Math.PI * 2);
       ctx.fill();
 
-      // Label
       if (checkLabels.checked) {
         ctx.fillStyle = '#6ee7b7';
         ctx.font = 'bold 11px ui-monospace, monospace';
@@ -630,14 +660,12 @@
   function findNodeUnderMouse(worldX, worldY) {
     const hitRadiusPadding = 8 / state.view.zoom;
 
-    // 1. Check Cranks (P_i)
     for (const crank of state.cranks) {
       if (Math.hypot(crank.x - worldX, crank.y - worldY) <= crank.radius + hitRadiusPadding) {
         return crank;
       }
     }
 
-    // 2. Check Fixed Axes (O_i)
     for (const axis of state.axes) {
       if (Math.hypot(axis.x - worldX, axis.y - worldY) <= axis.radius + hitRadiusPadding) {
         return axis;
@@ -645,13 +673,6 @@
     }
 
     return null;
-  }
-
-  function normalizeAngleDiff(angle1, angle2) {
-    let diff = angle1 - angle2;
-    while (diff < -Math.PI) diff += 2 * Math.PI;
-    while (diff > Math.PI) diff -= 2 * Math.PI;
-    return diff;
   }
 
   // --- Mouse Interaction with Substepped Cascading Kinematics ---
@@ -683,24 +704,19 @@
       const targetY = worldPos.y + state.dragOffset.y;
 
       if (node.type === 'axis') {
-        // Dragging fixed axis O_i
         const oldX = node.x;
         const oldY = node.y;
         node.x = targetX;
         node.y = targetY;
 
-        // Verify if entire chain remains physically solvable
         const testPose = solveChainFrom(node.index, state.cranks[node.index].angle);
         if (testPose) {
           applyChain(testPose);
         } else {
-          // Revert if out of physical reach
           node.x = oldX;
           node.y = oldY;
         }
       } else if (node.type === 'crank') {
-        // 요구사항 2-B: 마우스 드래그 조작 중일 때 물리 한계에 막히면,
-        // 연결된 다른 관절들을 연쇄적으로 밀고 당겨 기하학적 구속을 유지하며 이동
         const k = node.index;
         const axis = state.axes[k];
         const targetAngle = Math.atan2(targetY - axis.y, targetX - axis.x);
@@ -708,7 +724,6 @@
         const delta = normalizeAngleDiff(targetAngle, currentAngle);
 
         if (Math.abs(delta) > 1e-4) {
-          // Substepped continuous search along drag direction
           const steps = Math.min(25, Math.max(5, Math.ceil(Math.abs(delta) / 0.04)));
           let bestValidCand = null;
 
@@ -718,7 +733,6 @@
             if (cand) {
               bestValidCand = cand;
             } else {
-              // Physical limit boundary reached! Stop advancing to prevent bar deformation
               break;
             }
           }
@@ -808,7 +822,7 @@
     const newN = Math.max(2, Math.min(10, parseInt(inputN.value, 10) || 4));
     const newR = Math.max(30, Math.min(350, parseFloat(inputR.value) || 120));
     const newA = Math.max(20, Math.min(250, parseFloat(inputA.value) || 80));
-    const newB = Math.max(30, Math.min(400, parseFloat(inputB.value) || 130));
+    const newB = Math.max(30, Math.min(400, parseFloat(inputB.value) || 120));
     const newSpeed = parseFloat(inputSpeed.value) || 45;
 
     state.N = newN;
@@ -826,8 +840,9 @@
     setAutoRotation(!state.isAutoRotating);
   });
 
+  // 요구사항 1: '자세 초기화' 버튼 시 모든 관절의 시작 각도를 상방 +60도로 완전 통일
   btnResetPose.addEventListener('click', () => {
-    initMechanism(true);
+    setUniformInitialPose(state.defaultAngle);
     clearTraces();
   });
 
@@ -848,7 +863,7 @@
     }
   });
 
-  // --- Initialization & Boot ---
+  // --- Boot ---
   resizeCanvas();
   initMechanism(false);
   resetView();
