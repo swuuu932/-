@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>2D Linkage Mechanism Simulator</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app-container">
+    <!-- Top Header & Dashboard -->
+    <header>
+      <div class="brand">
+        <h1>2D Linkage Mechanism Simulator</h1>
+        <span class="badge">Kinematics v2.0</span>
+      </div>
+
+      <!-- Real-time parameter indicators (요구사항 5: 상단 현재 설정된 수치 및 상태 표시) -->
+      <div class="top-dashboard">
+        <div class="param-pill" title="고정축 개수 N">
+          <span class="label">N =</span>
+          <span class="val" id="dispN">4</span>
+        </div>
+        <div class="param-pill" title="고정축 간격 r">
+          <span class="label">r =</span>
+          <span class="val" id="dispR">120 px</span>
+        </div>
+        <div class="param-pill" title="막대 a 길이 (굵은 막대)">
+          <span class="label">a =</span>
+          <span class="val" id="dispA" style="color: var(--accent-blue)">80 px</span>
+        </div>
+        <div class="param-pill" title="막대 b 길이 (가는 막대)">
+          <span class="label">b =</span>
+          <span class="val" id="dispB" style="color: var(--accent-rose)">130 px</span>
+        </div>
+        <div class="status-pill" id="statusPill">
+          <span class="indicator-dot"></span>
+          <span id="statusText">자동 회전 대기</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main Workspace -->
+    <div id="workspace">
+      <!-- Interactive Canvas Area -->
+      <div id="canvas-container">
+        <!-- Floating HUD notice -->
+        <div class="canvas-floating-hud">
+          <div class="hud-notice">
+            <span class="icon">💡</span>
+            <span>화면의 <b>모든 관절(P, Q)</b>과 <b>고정축(O)</b>을 마우스로 잡고 드래그해보세요!</span>
+          </div>
+          <div class="hud-alert-auto-pause" id="hudAutoPauseAlert">
+            ⚠️ 마우스 조작 감지됨: 안전을 위해 자동 회전이 즉시 일시 정지되었습니다.
+          </div>
+        </div>
+
+        <!-- Canvas controls overlay (zoom/pan reset) -->
+        <div class="canvas-controls-overlay">
+          <button class="mini-tool-btn" id="btnResetView" title="화면 시점 중앙 정렬">
+            🔍 화면 맞춤
+          </button>
+          <button class="mini-tool-btn" id="btnToggleHelp" title="가이드 토글">
+            ℹ️ 조작 도움말
+          </button>
+        </div>
+
+        <canvas id="simCanvas"></canvas>
+      </div>
+
+      <!-- Sidebar Controls Panel -->
+      <aside id="sidebar">
+        <!-- Section 1: 수치 직접 입력 기능 (Input Fields) -->
+        <div class="panel-section">
+          <div class="section-title">
+            <span>수치 직접 입력 (Parameters)</span>
+            <span class="badge-num">1</span>
+          </div>
+          
+          <div class="input-grid">
+            <div class="input-group">
+              <div class="input-label-row">
+                <label for="inputN">관절/축 개수 (N)</label>
+                <span class="input-hint">2 ~ 10</span>
+              </div>
+              <input type="number" id="inputN" min="2" max="10" value="4" step="1">
+            </div>
+
+            <div class="input-group">
+              <div class="input-label-row">
+                <label for="inputR">축 간격 (r)</label>
+                <span class="input-hint">px</span>
+              </div>
+              <input type="number" id="inputR" min="30" max="350" value="120" step="5">
+            </div>
+
+            <div class="input-group">
+              <div class="input-label-row">
+                <label for="inputA">
+                  <span class="color-indicator" style="background: var(--bar-a-color)"></span>
+                  막대 a (굵은 막대)
+                </label>
+                <span class="input-hint">px</span>
+              </div>
+              <input type="number" id="inputA" min="20" max="250" value="80" step="5">
+            </div>
+
+            <div class="input-group">
+              <div class="input-label-row">
+                <label for="inputB">
+                  <span class="color-indicator" style="background: var(--bar-b-color)"></span>
+                  막대 b (가는 막대)
+                </label>
+                <span class="input-hint">px</span>
+              </div>
+              <input type="number" id="inputB" min="30" max="400" value="130" step="5">
+            </div>
+
+            <div class="input-group full-width">
+              <div class="input-label-row">
+                <label for="inputSpeed">자동 회전 속도 (Speed)</label>
+                <span class="input-hint" id="speedUnitHint">°/초</span>
+              </div>
+              <input type="number" id="inputSpeed" min="-360" max="360" value="45" step="5">
+            </div>
+
+            <div class="input-group full-width">
+              <div class="input-label-row">
+                <label for="selectTopology">연결 방식 (Topology)</label>
+              </div>
+              <select id="selectTopology">
+                <option value="v_coupler">V-링크 Q-관절 체인 (Pi - Qi - Pi+1)</option>
+                <option value="parallel_chain">직렬 커플러 체인 + 엔드 Q 관절</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="btn-group">
+            <button class="btn-primary" id="btnApply">
+              <span>✓ 설정 적용 (Apply)</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Section 2: 자동 회전 및 안전 제어 (Auto-rotation & Controls) -->
+        <div class="panel-section">
+          <div class="section-title">
+            <span>자동 회전 및 제어 (Controls)</span>
+            <span class="badge-num">2</span>
+          </div>
+
+          <div class="btn-group">
+            <button class="btn-accent" id="btnAutoRotate">
+              <span id="autoRotateIcon">▶</span>
+              <span id="autoRotateText">자동 회전 시작</span>
+            </button>
+
+            <div class="btn-row">
+              <button class="btn-secondary" id="btnResetPose" style="flex: 1;" title="관절 각도 기본값 리셋">
+                ↺ 자세 초기화
+              </button>
+              <button class="btn-secondary" id="btnCenterAxes" style="flex: 1;" title="고정축 일렬 재정렬">
+                ⇥ 축 간격 재배열
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Section 3: 시각화 및 UI 편의 기능 (Visualization & Traces) -->
+        <div class="panel-section">
+          <div class="section-title">
+            <span>시각화 및 궤적 (Visualization)</span>
+            <span class="badge-num">3</span>
+          </div>
+
+          <div class="toggle-row">
+            <label class="toggle-label" for="checkTrace">
+              <input type="checkbox" id="checkTrace" checked>
+              <span>모든 관절 궤적(Trace) 표시</span>
+            </label>
+            <button class="btn-danger" id="btnClearTrace" style="padding: 4px 8px; font-size: 0.72rem;">
+              궤적 초기화
+            </button>
+          </div>
+
+          <div class="toggle-row">
+            <label class="toggle-label" for="checkLimitGuides">
+              <input type="checkbox" id="checkLimitGuides" checked>
+              <span>기하학적 한계(Reach Limit) 가이드선</span>
+            </label>
+          </div>
+
+          <div class="toggle-row">
+            <label class="toggle-label" for="checkLabels">
+              <input type="checkbox" id="checkLabels" checked>
+              <span>관절/축 명칭 라벨 (O, P, Q)</span>
+            </label>
+          </div>
+
+          <!-- Color Legend -->
+          <div class="legend-list">
+            <div class="legend-item">
+              <div class="legend-color-sample">
+                <div class="color-dot-axis"></div>
+                <span>고정축 (O)</span>
+              </div>
+              <span style="color: var(--axis-color); font-family: var(--font-mono);">드래그 이동 가능</span>
+            </div>
+            <div class="legend-item">
+              <div class="legend-color-sample">
+                <div class="color-bar-thick"></div>
+                <span>막대 a (굵은 막대)</span>
+              </div>
+              <span style="color: var(--bar-a-color); font-family: var(--font-mono);">길이 a (고정)</span>
+            </div>
+            <div class="legend-item">
+              <div class="legend-color-sample">
+                <div class="color-bar-thin"></div>
+                <span>막대 b (가는 막대)</span>
+              </div>
+              <span style="color: var(--bar-b-color); font-family: var(--font-mono);">길이 b (구속)</span>
+            </div>
+            <div class="legend-item">
+              <div class="legend-color-sample">
+                <div class="color-dot-joint"></div>
+                <span>크랭크 관절 (P)</span>
+              </div>
+              <span style="color: var(--joint-color); font-family: var(--font-mono);">원 궤도 회전</span>
+            </div>
+            <div class="legend-item">
+              <div class="legend-color-sample">
+                <div class="color-dot-q"></div>
+                <span>자유 관절 (Q)</span>
+              </div>
+              <span style="color: var(--accent-purple); font-family: var(--font-mono);">체인 연동 매개</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Section 4: 가이드 안내 문구 (Instructions) -->
+        <div class="panel-section">
+          <div class="section-title">
+            <span>조작 가이드 (Guide)</span>
+            <span class="badge-num">ℹ</span>
+          </div>
+
+          <div class="guide-content">
+            <div class="guide-step">
+              <span class="step-idx">1.</span>
+              <span><b>마우스 완전 자유 조작:</b> 화면 속 <b>모든 관절(P, Q)</b>과 <b>고정축(O)</b>을 클릭해 자유롭게 드래그하세요.</span>
+            </div>
+            <div class="guide-step">
+              <span class="step-idx">2.</span>
+              <span><b>연쇄 연동(Chain Kinematics):</b> 관절이 막대 b의 한계 길이에 도달하면 이웃한 관절과 막대들을 자연스럽게 끌고 가며 연쇄 회전합니다.</span>
+            </div>
+            <div class="guide-step">
+              <span class="step-idx">3.</span>
+              <span><b>안전 제어:</b> 자동 회전 중 마우스로 아무 관절이나 잡으면 즉시 회전이 정지되어 안전하게 조작할 수 있습니다.</span>
+            </div>
+            <div class="guide-step">
+              <span class="step-idx">4.</span>
+              <span><b>화면 조작:</b> 마우스 휠로 <b>확대/축소</b>, 빈 공간 드래그 또는 우클릭 드래그로 <b>화면 이동(Pan)</b>이 가능합니다.</span>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <script src="simulator.js"></script>
+</body>
+</html>
