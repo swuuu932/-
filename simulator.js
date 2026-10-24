@@ -1,6 +1,6 @@
 /**
  * 2D Linkage Mechanism Simulator (2차원 링크 메커니즘 시뮬레이터)
- * Position-Based Dynamics (PBD) & Chain Kinematics Engine
+ * Position-Based Dynamics (PBD) & Serial Kinematics Engine
  */
 
 (function () {
@@ -16,7 +16,6 @@
   const inputA = document.getElementById('inputA');
   const inputB = document.getElementById('inputB');
   const inputSpeed = document.getElementById('inputSpeed');
-  const selectTopology = document.getElementById('selectTopology');
   const btnApply = document.getElementById('btnApply');
 
   // Controls
@@ -50,7 +49,6 @@
     a: 80,                 // 굵은 막대 a 길이
     b: 130,                // 가는 막대 b 길이
     speedDeg: 45,          // 자동 회전 속도 (deg/sec)
-    topology: 'v_coupler', // 'v_coupler' or 'parallel_chain'
     
     isAutoRotating: false,
     autoRotateAngle: 0,    // 1번 크랭크 각도 (rad)
@@ -58,7 +56,6 @@
     // Nodes
     axes: [],              // O_1 .. O_N
     cranks: [],            // P_1 .. P_N
-    qJoints: [],           // Q_1 .. Q_{N-1} (or Q for parallel_chain)
     
     // Traces
     traces: {},            // id -> array of {x, y}
@@ -80,10 +77,10 @@
     }
   };
 
-  // Joint Colors for distinct visualization
+  // Joint Colors for distinct trace visualization
   const TRACE_COLORS = [
-    '#38bdf8', '#f43f5e', '#10b981', '#a855f7', 
-    '#f59e0b', '#ec4899', '#14b8a6', '#6366f1'
+    '#38bdf8', '#f43f5e', '#10b981', '#f59e0b', 
+    '#ec4899', '#14b8a6', '#6366f1', '#8b5cf6'
   ];
 
   // --- Resize & HiDPI Setup ---
@@ -101,7 +98,7 @@
 
   // --- Mechanism Initialization ---
   function initMechanism(keepBasePositions = false) {
-    const { N, r, a, b, topology } = state;
+    const { N, r, a } = state;
 
     // Canvas size
     const rect = canvas.parentElement.getBoundingClientRect();
@@ -132,8 +129,7 @@
     const oldCranks = state.cranks;
     state.cranks = [];
     for (let i = 0; i < N; i++) {
-      // Default initial angle: slight wave or synchronous phase
-      let angle = -Math.PI / 2 + (i * 0.35);
+      let angle = -Math.PI / 2 + (i * 0.25);
       if (keepBasePositions && oldCranks[i]) {
         angle = oldCranks[i].angle;
       }
@@ -150,47 +146,6 @@
         y: py,
         radius: 8,
         axisIndex: i
-      });
-    }
-
-    // 3. Initialize Q Joints
-    state.qJoints = [];
-    if (topology === 'v_coupler') {
-      // N - 1 intermediate Q joints between P_i and P_{i+1}
-      for (let i = 0; i < N - 1; i++) {
-        const p1 = state.cranks[i];
-        const p2 = state.cranks[i + 1];
-        // Calculate initial Q position forming a triangle with P1 and P2
-        const midX = (p1.x + p2.x) / 2;
-        const midY = (p1.y + p2.y) / 2;
-        const d = Math.hypot(p2.x - p1.x, p2.y - p1.y);
-        const h = Math.sqrt(Math.max(0, b * b - (d / 2) * (d / 2))) || (b * 0.6);
-        
-        // Perpendicular offset pointing upwards
-        const nx = -(p2.y - p1.y) / (d || 1);
-        const ny = (p2.x - p1.x) / (d || 1);
-
-        state.qJoints.push({
-          id: `Q${i + 1}`,
-          index: i,
-          type: 'qJoint',
-          x: midX - nx * h,
-          y: midY - ny * h,
-          radius: 8,
-          connectsTo: [i, i + 1] // connected to P_i and P_{i+1}
-        });
-      }
-    } else {
-      // 'parallel_chain' mode: thin bars connect P_i directly to P_{i+1}, plus end Q joint
-      const pLast = state.cranks[N - 1];
-      state.qJoints.push({
-        id: 'Q',
-        index: 0,
-        type: 'qJoint',
-        x: pLast.x + b * 0.8,
-        y: pLast.y - b * 0.6,
-        radius: 9,
-        connectsTo: [N - 1] // connected to last crank P_N
       });
     }
 
@@ -212,7 +167,7 @@
    * @param {number} iterations - Number of relaxation passes
    */
   function solveKinematics(drivenNode = null, iterations = 35) {
-    const { N, a, b, topology } = state;
+    const { N, a, b } = state;
 
     for (let iter = 0; iter < iterations; iter++) {
       // 1. Maintain Circular Constraints for Cranks (P_i constrained to radius a around O_i)
@@ -235,31 +190,11 @@
         }
       }
 
-      // 2. Bar b Constraints (Distance relaxation)
-      if (topology === 'v_coupler') {
-        // In V-coupler mode, thin bar b connects P_i to Q_i and Q_i to P_{i+1}
-        for (let i = 0; i < state.qJoints.length; i++) {
-          const q = state.qJoints[i];
-          const p1 = state.cranks[q.connectsTo[0]];
-          const p2 = state.cranks[q.connectsTo[1]];
-
-          relaxDistance(p1, q, b, drivenNode, 0.45, 0.55);
-          relaxDistance(q, p2, b, drivenNode, 0.55, 0.45);
-        }
-      } else {
-        // In parallel_chain mode, thin bar b connects P_i to P_{i+1}
-        for (let i = 0; i < N - 1; i++) {
-          const p1 = state.cranks[i];
-          const p2 = state.cranks[i + 1];
-          relaxDistance(p1, p2, b, drivenNode, 0.5, 0.5);
-        }
-
-        // End Q joint connected to last crank P_N
-        if (state.qJoints.length > 0) {
-          const q = state.qJoints[0];
-          const pLast = state.cranks[N - 1];
-          relaxDistance(pLast, q, b, drivenNode, 0.4, 0.6);
-        }
+      // 2. Bar b Constraints: serial coupler connecting P_i and P_{i+1}
+      for (let i = 0; i < N - 1; i++) {
+        const p1 = state.cranks[i];
+        const p2 = state.cranks[i + 1];
+        relaxDistance(p1, p2, b, drivenNode, 0.5, 0.5);
       }
     }
 
@@ -312,19 +247,11 @@
   function recordTraces() {
     if (!checkTrace.checked) return;
 
-    // Record cranks
+    // Record cranks (P_1 .. P_N)
     state.cranks.forEach((crank) => {
       if (!state.traces[crank.id]) state.traces[crank.id] = [];
       const list = state.traces[crank.id];
       list.push({ x: crank.x, y: crank.y });
-      if (list.length > state.maxTraceLength) list.shift();
-    });
-
-    // Record Q joints
-    state.qJoints.forEach((q) => {
-      if (!state.traces[q.id]) state.traces[q.id] = [];
-      const list = state.traces[q.id];
-      list.push({ x: q.x, y: q.y });
       if (list.length > state.maxTraceLength) list.shift();
     });
   }
@@ -394,7 +321,7 @@
     // 5. Draw Fixed Axes Ground Brackets & Pivots
     drawAxes();
 
-    // 6. Draw Joint Nodes (P & Q)
+    // 6. Draw Crank Joint Nodes (P_1 .. P_N)
     drawJoints();
 
     ctx.restore();
@@ -465,55 +392,23 @@
   }
 
   function drawBars() {
-    const { topology } = state;
-
-    // --- Draw Thin Bars (b) First (behind thick bars) ---
+    // --- Draw Thin Bars (b) First (behind thick bars): P_i to P_{i+1} ---
     ctx.save();
     ctx.lineWidth = 3.5;
     ctx.strokeStyle = '#f43f5e';
     ctx.lineCap = 'round';
 
-    if (topology === 'v_coupler') {
-      for (const q of state.qJoints) {
-        const p1 = state.cranks[q.connectsTo[0]];
-        const p2 = state.cranks[q.connectsTo[1]];
-
-        // Bar from P1 to Q
-        ctx.beginPath();
-        ctx.moveTo(p1.x, p1.y);
-        ctx.lineTo(q.x, q.y);
-        ctx.stroke();
-
-        // Bar from Q to P2
-        ctx.beginPath();
-        ctx.moveTo(q.x, q.y);
-        ctx.lineTo(p2.x, p2.y);
-        ctx.stroke();
-      }
-    } else {
-      // Parallel Chain Couplers
-      for (let i = 0; i < state.cranks.length - 1; i++) {
-        const p1 = state.cranks[i];
-        const p2 = state.cranks[i + 1];
-        ctx.beginPath();
-        ctx.moveTo(p1.x, p1.y);
-        ctx.lineTo(p2.x, p2.y);
-        ctx.stroke();
-      }
-
-      // Bar from last crank to Q
-      if (state.qJoints.length > 0) {
-        const q = state.qJoints[0];
-        const pLast = state.cranks[state.cranks.length - 1];
-        ctx.beginPath();
-        ctx.moveTo(pLast.x, pLast.y);
-        ctx.lineTo(q.x, q.y);
-        ctx.stroke();
-      }
+    for (let i = 0; i < state.cranks.length - 1; i++) {
+      const p1 = state.cranks[i];
+      const p2 = state.cranks[i + 1];
+      ctx.beginPath();
+      ctx.moveTo(p1.x, p1.y);
+      ctx.lineTo(p2.x, p2.y);
+      ctx.stroke();
     }
     ctx.restore();
 
-    // --- Draw Thick Bars (a) ---
+    // --- Draw Thick Bars (a): O_i to P_i ---
     ctx.save();
     ctx.lineWidth = 9;
     ctx.lineCap = 'round';
@@ -602,7 +497,7 @@
   }
 
   function drawJoints() {
-    // 1. Draw Crank Joints (P_1 .. P_N)
+    // Draw Crank Joints (P_1 .. P_N)
     for (const crank of state.cranks) {
       const isHovered = state.hoveredNode === crank;
       const isDragged = state.draggedNode === crank;
@@ -637,46 +532,6 @@
         ctx.font = 'bold 11px ui-monospace, monospace';
         ctx.textAlign = 'center';
         ctx.fillText(crank.id, crank.x, crank.y - 12);
-      }
-
-      ctx.restore();
-    }
-
-    // 2. Draw Q Joints
-    for (const q of state.qJoints) {
-      const isHovered = state.hoveredNode === q;
-      const isDragged = state.draggedNode === q;
-
-      ctx.save();
-      // Outer Purple Halo
-      if (isHovered || isDragged) {
-        ctx.fillStyle = 'rgba(168, 85, 247, 0.3)';
-        ctx.beginPath();
-        ctx.arc(q.x, q.y, q.radius + 7, 0, Math.PI * 2);
-        ctx.fill();
-      }
-
-      // Joint Circle
-      ctx.fillStyle = '#a855f7';
-      ctx.strokeStyle = '#3b0764';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(q.x, q.y, q.radius, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.stroke();
-
-      // Center Diamond
-      ctx.fillStyle = '#fdf4ff';
-      ctx.beginPath();
-      ctx.arc(q.x, q.y, 2.5, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Label
-      if (checkLabels.checked) {
-        ctx.fillStyle = '#e9d5ff';
-        ctx.font = 'bold 12px ui-monospace, monospace';
-        ctx.textAlign = 'center';
-        ctx.fillText(q.id, q.x, q.y - 13);
       }
 
       ctx.restore();
@@ -727,21 +582,14 @@
   function findNodeUnderMouse(worldX, worldY) {
     const hitRadiusPadding = 8 / state.view.zoom;
 
-    // 1. Check Q Joints
-    for (const q of state.qJoints) {
-      if (Math.hypot(q.x - worldX, q.y - worldY) <= q.radius + hitRadiusPadding) {
-        return q;
-      }
-    }
-
-    // 2. Check Cranks (P_i)
+    // 1. Check Cranks (P_i)
     for (const crank of state.cranks) {
       if (Math.hypot(crank.x - worldX, crank.y - worldY) <= crank.radius + hitRadiusPadding) {
         return crank;
       }
     }
 
-    // 3. Check Fixed Axes (O_i)
+    // 2. Check Fixed Axes (O_i)
     for (const axis of state.axes) {
       if (Math.hypot(axis.x - worldX, axis.y - worldY) <= axis.radius + hitRadiusPadding) {
         return axis;
@@ -808,13 +656,6 @@
 
         // Run kinematic chain relaxation!
         solveKinematics(node, 30);
-      } else if (node.type === 'qJoint') {
-        // Dragging free Q joint: moves in 2D space, pulls connected bars and cranks
-        node.x = targetX;
-        node.y = targetY;
-
-        // Run kinematic chain relaxation!
-        solveKinematics(node, 35);
       }
 
       recordTraces();
@@ -869,7 +710,7 @@
 
     // Compute bounding box
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    const allNodes = [...state.axes, ...state.cranks, ...state.qJoints];
+    const allNodes = [...state.axes, ...state.cranks];
     for (const node of allNodes) {
       minX = Math.min(minX, node.x);
       maxX = Math.max(maxX, node.x);
@@ -903,14 +744,12 @@
     const newA = Math.max(20, Math.min(250, parseFloat(inputA.value) || 80));
     const newB = Math.max(30, Math.min(400, parseFloat(inputB.value) || 130));
     const newSpeed = parseFloat(inputSpeed.value) || 45;
-    const newTopology = selectTopology.value;
 
     state.N = newN;
     state.r = newR;
     state.a = newA;
     state.b = newB;
     state.speedDeg = newSpeed;
-    state.topology = newTopology;
 
     initMechanism(false);
     clearTraces();

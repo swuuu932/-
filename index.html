@@ -46,9 +46,9 @@
       <div id="canvas-container">
         <!-- Floating HUD notice -->
         <div class="canvas-floating-hud">
-          <div class="hud-notice">
+            <div class="hud-notice">
             <span class="icon">💡</span>
-            <span>화면의 <b>모든 관절(P, Q)</b>과 <b>고정축(O)</b>을 마우스로 잡고 드래그해보세요!</span>
+            <span>화면의 <b>모든 관절(P)</b>과 <b>고정축(O)</b>을 마우스로 잡고 드래그해보세요!</span>
           </div>
           <div class="hud-alert-auto-pause" id="hudAutoPauseAlert">
             ⚠️ 마우스 조작 감지됨: 안전을 위해 자동 회전이 즉시 일시 정지되었습니다.
@@ -123,16 +123,6 @@
               </div>
               <input type="number" id="inputSpeed" min="-360" max="360" value="45" step="5">
             </div>
-
-            <div class="input-group full-width">
-              <div class="input-label-row">
-                <label for="selectTopology">연결 방식 (Topology)</label>
-              </div>
-              <select id="selectTopology">
-                <option value="v_coupler">V-링크 Q-관절 체인 (Pi - Qi - Pi+1)</option>
-                <option value="parallel_chain">직렬 커플러 체인 + 엔드 Q 관절</option>
-              </select>
-            </div>
           </div>
 
           <div class="btn-group">
@@ -193,7 +183,7 @@
           <div class="toggle-row">
             <label class="toggle-label" for="checkLabels">
               <input type="checkbox" id="checkLabels" checked>
-              <span>관절/축 명칭 라벨 (O, P, Q)</span>
+              <span>관절/축 명칭 라벨 (O, P)</span>
             </label>
           </div>
 
@@ -227,13 +217,6 @@
               </div>
               <span style="color: var(--joint-color); font-family: var(--font-mono);">원 궤도 회전</span>
             </div>
-            <div class="legend-item">
-              <div class="legend-color-sample">
-                <div class="color-dot-q"></div>
-                <span>자유 관절 (Q)</span>
-              </div>
-              <span style="color: var(--accent-purple); font-family: var(--font-mono);">체인 연동 매개</span>
-            </div>
           </div>
         </div>
 
@@ -247,7 +230,7 @@
           <div class="guide-content">
             <div class="guide-step">
               <span class="step-idx">1.</span>
-              <span><b>마우스 완전 자유 조작:</b> 화면 속 <b>모든 관절(P, Q)</b>과 <b>고정축(O)</b>을 클릭해 자유롭게 드래그하세요.</span>
+              <span><b>마우스 완전 자유 조작:</b> 화면 속 <b>모든 관절(P₁~P_N)</b>과 <b>고정축(O₁~O_N)</b>을 클릭해 자유롭게 드래그하세요.</span>
             </div>
             <div class="guide-step">
               <span class="step-idx">2.</span>
