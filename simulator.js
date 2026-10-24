@@ -1,6 +1,6 @@
 /**
  * 2D Linkage Mechanism Simulator (2차원 링크 메커니즘 시뮬레이터)
- * Position-Based Dynamics (PBD) & Serial Kinematics Engine
+ * Exact Analytical Rigid-Body Kinematics Engine (100% Fixed Bar Length)
  */
 
 (function () {
@@ -46,8 +46,8 @@
   const state = {
     N: 4,                  // 관절/축 개수
     r: 120,                // 고정축 간격
-    a: 80,                 // 굵은 막대 a 길이
-    b: 130,                // 가는 막대 b 길이
+    a: 80,                 // 굵은 막대 a 길이 (완전 고정 강체)
+    b: 130,                // 가는 막대 b 길이 (완전 고정 강체)
     speedDeg: 45,          // 자동 회전 속도 (deg/sec)
     
     isAutoRotating: false,
@@ -77,7 +77,7 @@
     }
   };
 
-  // Joint Colors for distinct trace visualization
+  // Trace Colors for distinct visualization
   const TRACE_COLORS = [
     '#38bdf8', '#f43f5e', '#10b981', '#f59e0b', 
     '#ec4899', '#14b8a6', '#6366f1', '#8b5cf6'
@@ -96,11 +96,147 @@
     resizeCanvas();
   });
 
+  // --- Exact Circle-Circle Intersection Solver ---
+  /**
+   * Solves analytically for Point P such that:
+   * 1. |P - O| = r1 (Radius r1 around fixed axis O, length of bar a)
+   * 2. |P - targetP| = r2 (Radius r2 around neighbor joint, length of bar b)
+   * 
+   * Guarantees 100% exact mathematical rigidity with ZERO stretching or deformation.
+   * Chooses the solution branch maintaining continuous smooth displacement from prevP.
+   */
+  function solveCircleIntersection(O, r1, targetP, r2, prevP = null) {
+    const dx = targetP.x - O.x;
+    const dy = targetP.y - O.y;
+    const d = Math.hypot(dx, dy);
+
+    // Physical Reach Limit Check
+    // If distance d > r1 + r2 or d < |r1 - r2|, circles do NOT intersect!
+    const eps = 1e-5;
+    if (d > r1 + r2 + eps || d < Math.abs(r1 - r2) - eps || d < eps) {
+      return null; // Out of reach limit
+    }
+
+    const clampedD = Math.max(Math.abs(r1 - r2), Math.min(r1 + r2, d));
+
+    // Distance from O to the chord along O -> targetP line
+    const x0 = (r1 * r1 - r2 * r2 + clampedD * clampedD) / (2 * clampedD);
+    const hSq = r1 * r1 - x0 * x0;
+    const h = Math.sqrt(Math.max(0, hSq));
+
+    const ux = dx / clampedD;
+    const uy = dy / clampedD;
+    const vx = -uy;
+    const vy = ux;
+
+    const sol1 = {
+      x: O.x + x0 * ux + h * vx,
+      y: O.y + x0 * uy + h * vy
+    };
+    const sol2 = {
+      x: O.x + x0 * ux - h * vx,
+      y: O.y + x0 * uy - h * vy
+    };
+
+    if (!prevP) {
+      // Default to upper branch (smaller y in canvas coords)
+      return sol1.y <= sol2.y ? sol1 : sol2;
+    }
+
+    // Branch continuity: select solution closest to previous position
+    const d1 = Math.hypot(sol1.x - prevP.x, sol1.y - prevP.y);
+    const d2 = Math.hypot(sol2.x - prevP.x, sol2.y - prevP.y);
+    return d1 <= d2 ? sol1 : sol2;
+  }
+
+  // --- Cascading Chain Kinematics Solver ---
+  /**
+   * Attempts to solve the entire linkage chain with crank drivenIndex at targetAngle.
+   * Propagates backwards to joint 0 and forwards to joint N-1.
+   * Returns array of valid joint states if 100% geometrically reachable, or null if physical limit hit.
+   */
+  function solveChainFrom(drivenIndex, targetAngle) {
+    const { N, a, b, axes, cranks } = state;
+    const cand = new Array(N);
+
+    // 1. Position of driven crank
+    const drivenAxis = axes[drivenIndex];
+    cand[drivenIndex] = {
+      x: drivenAxis.x + a * Math.cos(targetAngle),
+      y: drivenAxis.y + a * Math.sin(targetAngle),
+      angle: targetAngle
+    };
+
+    // 2. Backward propagation: from drivenIndex - 1 down to 0
+    for (let i = drivenIndex - 1; i >= 0; i--) {
+      const axis = axes[i];
+      const nextP = cand[i + 1];
+      const prevCrank = cranks[i];
+      const sol = solveCircleIntersection(axis, a, nextP, b, prevCrank);
+      if (!sol) return null; // Hit backward reach limit!
+
+      cand[i] = {
+        x: sol.x,
+        y: sol.y,
+        angle: Math.atan2(sol.y - axis.y, sol.x - axis.x)
+      };
+    }
+
+    // 3. Forward propagation: from drivenIndex + 1 up to N - 1
+    for (let i = drivenIndex + 1; i < N; i++) {
+      const axis = axes[i];
+      const prevP = cand[i - 1];
+      const prevCrank = cranks[i];
+      const sol = solveCircleIntersection(axis, a, prevP, b, prevCrank);
+      if (!sol) return null; // Hit forward reach limit!
+
+      cand[i] = {
+        x: sol.x,
+        y: sol.y,
+        angle: Math.atan2(sol.y - axis.y, sol.x - axis.x)
+      };
+    }
+
+    return cand;
+  }
+
+  /**
+   * Applies validated candidate chain positions to state.cranks.
+   */
+  function applyChain(cand) {
+    for (let i = 0; i < state.N; i++) {
+      state.cranks[i].x = cand[i].x;
+      state.cranks[i].y = cand[i].y;
+      state.cranks[i].angle = cand[i].angle;
+    }
+  }
+
+  // --- Initial Pose Discovery ---
+  /**
+   * Scans for a geometrically valid initial configuration where all bars
+   * strictly satisfy their rigid length constraints.
+   */
+  function findValidInitialPose() {
+    const candidates = [
+      -Math.PI / 2, -Math.PI / 3, -2 * Math.PI / 3, 
+      -Math.PI / 4, -3 * Math.PI / 4, -0.1, 0.1
+    ];
+    for (const ang of candidates) {
+      const cand = solveChainFrom(0, ang);
+      if (cand) return cand;
+    }
+    // Fine scan if default angles don't resolve
+    for (let ang = -Math.PI; ang <= Math.PI; ang += 0.05) {
+      const cand = solveChainFrom(0, ang);
+      if (cand) return cand;
+    }
+    return null;
+  }
+
   // --- Mechanism Initialization ---
   function initMechanism(keepBasePositions = false) {
     const { N, r, a } = state;
 
-    // Canvas size
     const rect = canvas.parentElement.getBoundingClientRect();
     const startX = (rect.width - (N - 1) * r) / 2;
     const startY = rect.height / 2 + 50;
@@ -125,129 +261,38 @@
       });
     }
 
-    // 2. Initialize Crank Joints (P_1 .. P_N)
-    const oldCranks = state.cranks;
+    // 2. Initialize Cranks (P_1 .. P_N)
     state.cranks = [];
     for (let i = 0; i < N; i++) {
-      let angle = -Math.PI / 2 + (i * 0.25);
-      if (keepBasePositions && oldCranks[i]) {
-        angle = oldCranks[i].angle;
-      }
       const axis = state.axes[i];
-      const px = axis.x + a * Math.cos(angle);
-      const py = axis.y + a * Math.sin(angle);
-
       state.cranks.push({
         id: `P${i + 1}`,
         index: i,
         type: 'crank',
-        angle: angle,
-        x: px,
-        y: py,
+        angle: -Math.PI / 2,
+        x: axis.x,
+        y: axis.y - a,
         radius: 8,
         axisIndex: i
       });
     }
 
-    // Solve initial constraints once to ensure exact geometry
-    solveKinematics(null, 40);
+    // 3. Solve exact rigid configuration
+    const initialPose = findValidInitialPose();
+    if (initialPose) {
+      applyChain(initialPose);
+      state.autoRotateAngle = state.cranks[0].angle;
+    } else {
+      showAlert('⚠️ 현재 입력된 수치(r, a, b)로는 강체 링크를 연결할 수 없습니다. 축 간격(r)이나 막대 길이를 조절해 주세요.');
+    }
 
-    // Synchronize autoRotateAngle with crank 0
-    state.autoRotateAngle = state.cranks[0].angle;
-
-    // Update Dashboard Display
     updateDashboard();
-  }
-
-  // --- Kinematic Constraint Solver (PBD / Chain Kinematics) ---
-  /**
-   * Solves all distance and circular constraints iteratively.
-   * If reach limits are encountered, neighbor joints are smoothly pulled along.
-   * @param {Object} drivenNode - The node being dragged by mouse or rotated by motor
-   * @param {number} iterations - Number of relaxation passes
-   */
-  function solveKinematics(drivenNode = null, iterations = 35) {
-    const { N, a, b } = state;
-
-    for (let iter = 0; iter < iterations; iter++) {
-      // 1. Maintain Circular Constraints for Cranks (P_i constrained to radius a around O_i)
-      for (let i = 0; i < N; i++) {
-        const crank = state.cranks[i];
-        const axis = state.axes[i];
-
-        if (crank === drivenNode) {
-          // Driven crank: angle is determined by drag or auto-rotation
-          crank.x = axis.x + a * Math.cos(crank.angle);
-          crank.y = axis.y + a * Math.sin(crank.angle);
-        } else {
-          // Free crank: project onto radius a from axis
-          const dx = crank.x - axis.x;
-          const dy = crank.y - axis.y;
-          const dist = Math.hypot(dx, dy) || 1e-5;
-          crank.x = axis.x + (dx / dist) * a;
-          crank.y = axis.y + (dy / dist) * a;
-          crank.angle = Math.atan2(crank.y - axis.y, crank.x - axis.x);
-        }
-      }
-
-      // 2. Bar b Constraints: serial coupler connecting P_i and P_{i+1}
-      for (let i = 0; i < N - 1; i++) {
-        const p1 = state.cranks[i];
-        const p2 = state.cranks[i + 1];
-        relaxDistance(p1, p2, b, drivenNode, 0.5, 0.5);
-      }
-    }
-
-    // Final pass: ensure strict radius constraint on cranks
-    for (let i = 0; i < N; i++) {
-      const crank = state.cranks[i];
-      const axis = state.axes[i];
-      const dx = crank.x - axis.x;
-      const dy = crank.y - axis.y;
-      const dist = Math.hypot(dx, dy) || 1e-5;
-      crank.x = axis.x + (dx / dist) * a;
-      crank.y = axis.y + (dy / dist) * a;
-      crank.angle = Math.atan2(crank.y - axis.y, crank.x - axis.x);
-    }
-  }
-
-  /**
-   * Relaxes distance between two nodes n1 and n2 to target distance L
-   */
-  function relaxDistance(n1, n2, targetL, drivenNode, weight1 = 0.5, weight2 = 0.5) {
-    const dx = n2.x - n1.x;
-    const dy = n2.y - n1.y;
-    const currentDist = Math.hypot(dx, dy) || 1e-5;
-    const delta = currentDist - targetL;
-
-    if (Math.abs(delta) < 1e-4) return;
-
-    const nx = dx / currentDist;
-    const ny = dy / currentDist;
-
-    // Weight allocation based on whether a node is being dragged
-    let w1 = weight1;
-    let w2 = weight2;
-
-    if (n1 === drivenNode) {
-      w1 = 0;
-      w2 = 1.0;
-    } else if (n2 === drivenNode) {
-      w1 = 1.0;
-      w2 = 0;
-    }
-
-    n1.x += nx * (delta * w1);
-    n1.y += ny * (delta * w1);
-    n2.x -= nx * (delta * w2);
-    n2.y -= ny * (delta * w2);
   }
 
   // --- Trace Management ---
   function recordTraces() {
     if (!checkTrace.checked) return;
 
-    // Record cranks (P_1 .. P_N)
     state.cranks.forEach((crank) => {
       if (!state.traces[crank.id]) state.traces[crank.id] = [];
       const list = state.traces[crank.id];
@@ -278,18 +323,51 @@
     }
   }
 
+  function showAlert(msg) {
+    hudAutoPauseAlert.textContent = msg;
+    hudAutoPauseAlert.style.display = 'block';
+    hudAutoPauseAlert.style.animation = 'none';
+    hudAutoPauseAlert.offsetHeight; // reflow
+    hudAutoPauseAlert.style.animation = 'fadeInOut 2.5s ease forwards';
+    setTimeout(() => {
+      hudAutoPauseAlert.style.display = 'none';
+    }, 2600);
+  }
+
   function triggerSafetyAutoPause() {
     if (state.isAutoRotating) {
       setAutoRotation(false);
-      hudAutoPauseAlert.style.display = 'block';
-      // Restart animation
-      hudAutoPauseAlert.style.animation = 'none';
-      hudAutoPauseAlert.offsetHeight; // trigger reflow
-      hudAutoPauseAlert.style.animation = 'fadeInOut 2.2s ease forwards';
-      setTimeout(() => {
-        hudAutoPauseAlert.style.display = 'none';
-      }, 2300);
+      showAlert('⚠️ 마우스 조작 감지: 안전을 위해 자동 회전이 즉시 정지되었습니다.');
     }
+  }
+
+  // --- Animation Loop ---
+  let lastTimestamp = 0;
+  function animate(timestamp) {
+    if (!lastTimestamp) lastTimestamp = timestamp;
+    const dt = Math.min((timestamp - lastTimestamp) / 1000, 0.05);
+    lastTimestamp = timestamp;
+
+    // 요구사항 2-A: 자동 회전 중 기하학적 한계에 부딪히면 막대 길이를 유지한 채 자동 회전을 즉시 정지
+    if (state.isAutoRotating && !state.draggedNode && state.cranks.length > 0) {
+      const speedRad = (state.speedDeg * Math.PI) / 180;
+      const nextAngle = state.autoRotateAngle + speedRad * dt;
+
+      // Exact rigid validation before advancing
+      const cand = solveChainFrom(0, nextAngle);
+      if (cand) {
+        applyChain(cand);
+        state.autoRotateAngle = nextAngle;
+        recordTraces();
+      } else {
+        // Physical limit reached! Stop auto-rotation immediately without deforming bars
+        setAutoRotation(false);
+        showAlert('🛑 기하학적 한계(Reach Limit) 도달: 막대 길이를 유지하기 위해 자동 회전이 정지되었습니다.');
+      }
+    }
+
+    draw();
+    requestAnimationFrame(animate);
   }
 
   // --- Rendering ---
@@ -298,30 +376,29 @@
     ctx.clearRect(0, 0, width, height);
 
     ctx.save();
-    // Apply View Transform (Pan & Zoom)
     ctx.translate(state.view.panX, state.view.panY);
     ctx.scale(state.view.zoom, state.view.zoom);
 
-    // 1. Draw Subtle Axis Baseline / Grid
+    // 1. Ground baseline
     drawBaseSupportLines();
 
-    // 2. Draw Geometric Reach Limit Circles (Optional guide)
+    // 2. Reach Limit Guides
     if (checkLimitGuides.checked) {
       drawLimitGuides();
     }
 
-    // 3. Draw Joint Traces
+    // 3. Traces
     if (checkTrace.checked) {
       drawTraces();
     }
 
-    // 4. Draw Bars
+    // 4. Bars (Strictly 100% fixed lengths a and b)
     drawBars();
 
-    // 5. Draw Fixed Axes Ground Brackets & Pivots
+    // 5. Fixed Axes (O_1 .. O_N)
     drawAxes();
 
-    // 6. Draw Crank Joint Nodes (P_1 .. P_N)
+    // 6. Crank Joints (P_1 .. P_N)
     drawJoints();
 
     ctx.restore();
@@ -349,7 +426,7 @@
     ctx.lineWidth = 1;
     ctx.setLineDash([4, 4]);
 
-    // Circle of radius a around each fixed axis
+    // Circle of radius a around each fixed axis O_i
     ctx.strokeStyle = 'rgba(56, 189, 248, 0.2)';
     for (const axis of state.axes) {
       ctx.beginPath();
@@ -357,7 +434,7 @@
       ctx.stroke();
     }
 
-    // Reach circles of radius b from cranks
+    // Reach circles of radius b from cranks P_i
     ctx.strokeStyle = 'rgba(244, 63, 94, 0.15)';
     for (const crank of state.cranks) {
       ctx.beginPath();
@@ -392,7 +469,8 @@
   }
 
   function drawBars() {
-    // --- Draw Thin Bars (b) First (behind thick bars): P_i to P_{i+1} ---
+    // 요구사항 3: 캔버스에 그려지는 모든 막대(a, b)의 시각적 길이는 수치 입력창과 100% 일치
+    // --- Draw Thin Bars (b): P_i to P_{i+1} ---
     ctx.save();
     ctx.lineWidth = 3.5;
     ctx.strokeStyle = '#f43f5e';
@@ -417,14 +495,14 @@
       const axis = state.axes[i];
       const crank = state.cranks[i];
 
-      // Outer sleek stroke
+      // Outer border
       ctx.strokeStyle = '#0284c7';
       ctx.beginPath();
       ctx.moveTo(axis.x, axis.y);
       ctx.lineTo(crank.x, crank.y);
       ctx.stroke();
 
-      // Inner highlight line for metallic depth
+      // Inner highlight line for metallic shine
       ctx.lineWidth = 4;
       ctx.strokeStyle = '#38bdf8';
       ctx.beginPath();
@@ -443,7 +521,7 @@
 
       ctx.save();
 
-      // 1. Fixed Base Support Bracket (Standard engineering hatch triangle)
+      // Ground bracket hatch triangle
       ctx.fillStyle = 'rgba(23, 31, 45, 0.9)';
       ctx.strokeStyle = '#f59e0b';
       ctx.lineWidth = 2;
@@ -455,7 +533,7 @@
       ctx.fill();
       ctx.stroke();
 
-      // Ground hatching lines
+      // Hatching stripes
       ctx.beginPath();
       for (let ox = -14; ox <= 14; ox += 7) {
         ctx.moveTo(axis.x + ox, axis.y + 20);
@@ -463,13 +541,13 @@
       }
       ctx.stroke();
 
-      // 2. Central Pivot Pin
+      // Pivot pin
       ctx.fillStyle = '#f59e0b';
       ctx.beginPath();
       ctx.arc(axis.x, axis.y, axis.radius, 0, Math.PI * 2);
       ctx.fill();
 
-      // Inner anchor ring
+      // Inner center dot
       ctx.fillStyle = '#0f141c';
       ctx.beginPath();
       ctx.arc(axis.x, axis.y, 4, 0, Math.PI * 2);
@@ -484,7 +562,7 @@
         ctx.stroke();
       }
 
-      // Axis Label
+      // Label
       if (checkLabels.checked) {
         ctx.fillStyle = '#f59e0b';
         ctx.font = 'bold 11px ui-monospace, monospace';
@@ -497,7 +575,6 @@
   }
 
   function drawJoints() {
-    // Draw Crank Joints (P_1 .. P_N)
     for (const crank of state.cranks) {
       const isHovered = state.hoveredNode === crank;
       const isDragged = state.draggedNode === crank;
@@ -538,41 +615,12 @@
     }
   }
 
-  // --- Animation Loop ---
-  let lastTimestamp = 0;
-  function animate(timestamp) {
-    if (!lastTimestamp) lastTimestamp = timestamp;
-    const dt = Math.min((timestamp - lastTimestamp) / 1000, 0.1);
-    lastTimestamp = timestamp;
-
-    // Handle Auto-Rotation
-    if (state.isAutoRotating && !state.draggedNode && state.cranks.length > 0) {
-      const speedRad = (state.speedDeg * Math.PI) / 180;
-      state.autoRotateAngle += speedRad * dt;
-      // Keep in range [-PI, PI]
-      state.autoRotateAngle = Math.atan2(Math.sin(state.autoRotateAngle), Math.cos(state.autoRotateAngle));
-
-      const firstCrank = state.cranks[0];
-      firstCrank.angle = state.autoRotateAngle;
-      firstCrank.x = state.axes[0].x + state.a * Math.cos(state.autoRotateAngle);
-      firstCrank.y = state.axes[0].y + state.a * Math.sin(state.autoRotateAngle);
-
-      // Solve kinematics forward through the chain
-      solveKinematics(firstCrank, 25);
-      recordTraces();
-    }
-
-    draw();
-    requestAnimationFrame(animate);
-  }
-
   // --- Coordinate Transformation Helpers ---
   function getMouseWorldPos(e) {
     const rect = canvas.getBoundingClientRect();
     const clientX = e.clientX - rect.left;
     const clientY = e.clientY - rect.top;
 
-    // Transform by pan & zoom
     return {
       x: (clientX - state.view.panX) / state.view.zoom,
       y: (clientY - state.view.panY) / state.view.zoom
@@ -599,22 +647,26 @@
     return null;
   }
 
-  // --- Mouse / Touch Interaction ---
+  function normalizeAngleDiff(angle1, angle2) {
+    let diff = angle1 - angle2;
+    while (diff < -Math.PI) diff += 2 * Math.PI;
+    while (diff > Math.PI) diff -= 2 * Math.PI;
+    return diff;
+  }
+
+  // --- Mouse Interaction with Substepped Cascading Kinematics ---
   canvas.addEventListener('mousedown', (e) => {
     const worldPos = getMouseWorldPos(e);
     const node = findNodeUnderMouse(worldPos.x, worldPos.y);
 
     if (e.button === 0 && node) {
-      // Clicked on a joint or axis
       state.draggedNode = node;
       state.dragOffset.x = node.x - worldPos.x;
       state.dragOffset.y = node.y - worldPos.y;
 
-      // 요구사항 4: 사용자가 마우스로 관절을 직접 잡고 움직이면 자동 회전 즉시 일시 정지
       triggerSafetyAutoPause();
       canvas.style.cursor = 'grabbing';
     } else if (e.button === 1 || e.button === 2 || (!node && e.button === 0)) {
-      // Start Canvas Panning
       state.view.isPanning = true;
       state.view.panStartX = e.clientX - state.view.panX;
       state.view.panStartY = e.clientY - state.view.panY;
@@ -631,31 +683,53 @@
       const targetY = worldPos.y + state.dragOffset.y;
 
       if (node.type === 'axis') {
-        // Dragging fixed axis: translates axis & its crank
-        const dx = targetX - node.x;
-        const dy = targetY - node.y;
+        // Dragging fixed axis O_i
+        const oldX = node.x;
+        const oldY = node.y;
         node.x = targetX;
         node.y = targetY;
-        const crank = state.cranks[node.index];
-        if (crank) {
-          crank.x += dx;
-          crank.y += dy;
+
+        // Verify if entire chain remains physically solvable
+        const testPose = solveChainFrom(node.index, state.cranks[node.index].angle);
+        if (testPose) {
+          applyChain(testPose);
+        } else {
+          // Revert if out of physical reach
+          node.x = oldX;
+          node.y = oldY;
         }
-        solveKinematics(node, 20);
       } else if (node.type === 'crank') {
-        // Dragging crank joint P_i: rotates on circle of radius a
-        const axis = state.axes[node.axisIndex];
-        node.angle = Math.atan2(targetY - axis.y, targetX - axis.x);
-        node.x = axis.x + state.a * Math.cos(node.angle);
-        node.y = axis.y + state.a * Math.sin(node.angle);
+        // 요구사항 2-B: 마우스 드래그 조작 중일 때 물리 한계에 막히면,
+        // 연결된 다른 관절들을 연쇄적으로 밀고 당겨 기하학적 구속을 유지하며 이동
+        const k = node.index;
+        const axis = state.axes[k];
+        const targetAngle = Math.atan2(targetY - axis.y, targetX - axis.x);
+        const currentAngle = node.angle;
+        const delta = normalizeAngleDiff(targetAngle, currentAngle);
 
-        // If dragging crank 1, synchronize state.autoRotateAngle
-        if (node.axisIndex === 0) {
-          state.autoRotateAngle = node.angle;
+        if (Math.abs(delta) > 1e-4) {
+          // Substepped continuous search along drag direction
+          const steps = Math.min(25, Math.max(5, Math.ceil(Math.abs(delta) / 0.04)));
+          let bestValidCand = null;
+
+          for (let s = 1; s <= steps; s++) {
+            const testAng = currentAngle + (delta * s) / steps;
+            const cand = solveChainFrom(k, testAng);
+            if (cand) {
+              bestValidCand = cand;
+            } else {
+              // Physical limit boundary reached! Stop advancing to prevent bar deformation
+              break;
+            }
+          }
+
+          if (bestValidCand) {
+            applyChain(bestValidCand);
+            if (k === 0) {
+              state.autoRotateAngle = state.cranks[0].angle;
+            }
+          }
         }
-
-        // Run kinematic chain relaxation!
-        solveKinematics(node, 30);
       }
 
       recordTraces();
@@ -663,14 +737,9 @@
       state.view.panX = e.clientX - state.view.panStartX;
       state.view.panY = e.clientY - state.view.panStartY;
     } else {
-      // Hover detection
       const hovered = findNodeUnderMouse(worldPos.x, worldPos.y);
       state.hoveredNode = hovered;
-      if (hovered) {
-        canvas.style.cursor = 'grab';
-      } else {
-        canvas.style.cursor = 'default';
-      }
+      canvas.style.cursor = hovered ? 'grab' : 'default';
     }
   });
 
@@ -697,7 +766,6 @@
     const mouseX = e.clientX - rect.left;
     const mouseY = e.clientY - rect.top;
 
-    // Zoom centered at mouse cursor
     state.view.panX = mouseX - (mouseX - state.view.panX) * (newZoom / state.view.zoom);
     state.view.panY = mouseY - (mouseY - state.view.panY) * (newZoom / state.view.zoom);
     state.view.zoom = newZoom;
@@ -708,7 +776,6 @@
     if (state.axes.length === 0) return;
     const rect = canvas.parentElement.getBoundingClientRect();
 
-    // Compute bounding box
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
     const allNodes = [...state.axes, ...state.cranks];
     for (const node of allNodes) {
@@ -738,7 +805,6 @@
 
   // --- Button & Input Event Handlers ---
   btnApply.addEventListener('click', () => {
-    // Read and validate values
     const newN = Math.max(2, Math.min(10, parseInt(inputN.value, 10) || 4));
     const newR = Math.max(30, Math.min(350, parseFloat(inputR.value) || 120));
     const newA = Math.max(20, Math.min(250, parseFloat(inputA.value) || 80));
